@@ -39,7 +39,7 @@ func APIOnly(cfg *config.Config) []runner.Scenario {
 	var result []runner.Scenario
 	for _, s := range all {
 		name := s.Name()
-		if name != "push-artifacts-to-same-projects" &&
+		if name != "push-artifacts-to-same-project" &&
 			name != "push-artifacts-to-different-projects" &&
 			name != "pull-artifacts-from-same-project" &&
 			name != "pull-artifacts-from-different-projects" {

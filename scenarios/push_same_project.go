@@ -21,13 +21,13 @@ type PushSameProject struct {
 }
 
 type pushSameProjectData struct {
-	store   *harbor.ContentStore
+	store    *harbor.ContentStore
 	blobsArr [][]*ocispec.Descriptor
-	refs    []string
-	counter atomic.Int64
+	refs     []string
+	counter  atomic.Int64
 }
 
-func (s *PushSameProject) Name() string { return "push-artifacts-to-same-projects" }
+func (s *PushSameProject) Name() string { return "push-artifacts-to-same-project" }
 
 func (s *PushSameProject) Setup(_ context.Context, _ *harbor.Client) (runner.SharedData, error) {
 	projectName := harbor.RandomItem(harbor.GetProjectNames(s.cfg))

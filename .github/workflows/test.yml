@@ -73,21 +73,20 @@ jobs:
 
       - name: Prepare data
         env:
-          K6_QUIET: yes
           HARBOR_VUS: 20
           HARBOR_SIZE: ci
           HARBOR_URL: https://admin:Harbor1234567890@core.harbor.domain
-        run: go run mage.go prepare
+          HARBOR_DATASET_POLICY: fresh
+        run: go run ./cmd/harborperf prepare
 
       - name: Run all tests
         env:
-          K6_QUIET: yes
           HARBOR_VUS: 10
           HARBOR_ITERATIONS: 10
           HARBOR_SIZE: ci
           HARBOR_URL: https://admin:Harbor1234567890@core.harbor.domain
           HARBOR_REPORT: true
-        run: go run mage.go
+        run: go run ./cmd/harborperf run
 
       - name: Fetch harbor logs
         if: ${{ failure() }}

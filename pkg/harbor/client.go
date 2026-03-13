@@ -21,6 +21,8 @@ import (
 	projectop "github.com/goharbor/xk6-harbor/pkg/harbor/client/project"
 	"github.com/goharbor/xk6-harbor/pkg/harbor/client/quota"
 	"github.com/goharbor/xk6-harbor/pkg/harbor/client/repository"
+	scanallop "github.com/goharbor/xk6-harbor/pkg/harbor/client/scan_all"
+	scannerop "github.com/goharbor/xk6-harbor/pkg/harbor/client/scanner"
 	userop "github.com/goharbor/xk6-harbor/pkg/harbor/client/user"
 	"github.com/goharbor/xk6-harbor/pkg/harbor/models"
 )
@@ -448,6 +450,61 @@ func (c *Client) ListAuditLogs(ctx context.Context, page, pageSize int64) (*List
 		Logs:  res.Payload,
 		Total: res.XTotalCount,
 	}, nil
+}
+
+// --- Scanner and scan-all operations ---
+
+func (c *Client) CreateScanner(ctx context.Context, registration *models.ScannerRegistrationReq) (string, error) {
+	params := scannerop.NewCreateScannerParams().WithRegistration(registration)
+
+	res, err := c.api.Scanner.CreateScanner(ctx, params)
+	if err != nil {
+		name := ""
+		if registration != nil && registration.Name != nil {
+			name = *registration.Name
+		}
+		return "", fmt.Errorf("create scanner %s: %w", name, err)
+	}
+
+	return nameFromLocation(res.Location), nil
+}
+
+func (c *Client) SetScannerAsDefault(ctx context.Context, registrationID string) error {
+	params := scannerop.NewSetScannerAsDefaultParams().
+		WithRegistrationID(registrationID).
+		WithPayload(&models.IsDefault{IsDefault: true})
+
+	_, err := c.api.Scanner.SetScannerAsDefault(ctx, params)
+	if err != nil {
+		return fmt.Errorf("set scanner %s as default: %w", registrationID, err)
+	}
+
+	return nil
+}
+
+func (c *Client) StartScanAll(ctx context.Context) error {
+	params := scanallop.NewCreateScanAllScheduleParams().
+		WithSchedule(&models.Schedule{
+			Schedule: &models.ScheduleObj{Type: models.ScheduleObjTypeManual},
+		})
+
+	_, err := c.api.ScanAll.CreateScanAllSchedule(ctx, params)
+	if err != nil {
+		return fmt.Errorf("start scan all: %w", err)
+	}
+
+	return nil
+}
+
+func (c *Client) GetScanAllMetrics(ctx context.Context) (*models.Stats, error) {
+	params := scanallop.NewGetLatestScanAllMetricsParams()
+
+	res, err := c.api.ScanAll.GetLatestScanAllMetrics(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("get scan-all metrics: %w", err)
+	}
+
+	return res.Payload, nil
 }
 
 // --- Member operations ---

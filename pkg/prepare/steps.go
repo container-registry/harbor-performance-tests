@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-openapi/strfmt"
 	"github.com/goharbor/perf/pkg/config"
 	"github.com/goharbor/perf/pkg/harbor"
 	"github.com/goharbor/xk6-harbor/pkg/harbor/models"
@@ -22,34 +23,50 @@ type ProjectStep struct{}
 func (s *ProjectStep) Name() string { return "projects" }
 
 func (s *ProjectStep) Verify(ctx context.Context, h *harbor.Client, cfg *config.Config) error {
-	res, err := h.ListProjects(ctx, 1, 1)
+	count, err := countManagedProjects(ctx, h, cfg)
 	if err != nil {
 		return err
 	}
-	// Allow some slack (library project exists by default)
-	if res.Total < int64(cfg.ProjectsCount) {
-		return fmt.Errorf("expected >= %d projects, got %d", cfg.ProjectsCount, res.Total)
+	if count < cfg.ProjectsCount {
+		return fmt.Errorf("expected >= %d managed projects, got %d", cfg.ProjectsCount, count)
 	}
 	return nil
 }
 
 func (s *ProjectStep) Run(ctx context.Context, h *harbor.Client, cfg *config.Config, workers int) error {
+	if cfg.FakeScannerURL != "" {
+		name := fmt.Sprintf("fake-scanner-%d", time.Now().UnixMilli())
+		urlValue := strfmt.URI(cfg.FakeScannerURL)
+		if scannerID, err := h.CreateScanner(ctx, &models.ScannerRegistrationReq{
+			Name: &name,
+			URL:  &urlValue,
+		}); err == nil {
+			if err := h.SetScannerAsDefault(ctx, scannerID); err != nil {
+				log.Debugf("set fake scanner %s as default: %v", scannerID, err)
+			}
+		} else {
+			log.Debugf("create fake scanner %s: %v", name, err)
+		}
+	}
+
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
 
 	for i := 0; i < cfg.ProjectsCount; i++ {
 		name := harbor.GetProjectName(cfg, i)
+		projectName := name
 		g.Go(func() error {
-			md := map[string]string{}
-			if autoSbom := os.Getenv("AUTO_SBOM_GENERATION"); strings.EqualFold(autoSbom, "true") {
-				md["auto_sbom_generation"] = "true"
+			metadata := &models.ProjectMetadata{Public: "false"}
+			if cfg.AutoSBOMGeneration {
+				autoSBOM := "true"
+				metadata.AutoSbomGeneration = &autoSBOM
 			}
 			_, err := h.CreateProject(ctx, &models.ProjectReq{
-				ProjectName: name,
-				Metadata:    &models.ProjectMetadata{Public: "false"},
+				ProjectName: projectName,
+				Metadata:    metadata,
 			})
 			if err != nil && !strings.Contains(err.Error(), "409") {
-				return fmt.Errorf("create project %s: %w", name, err)
+				return fmt.Errorf("create project %s: %w", projectName, err)
 			}
 			return nil
 		})
@@ -58,15 +75,34 @@ func (s *ProjectStep) Run(ctx context.Context, h *harbor.Client, cfg *config.Con
 }
 
 func (s *ProjectStep) Clean(ctx context.Context, h *harbor.Client, cfg *config.Config, workers int) error {
+	projectNames := make([]string, 0, cfg.ProjectsCount)
+	page := int64(1)
+	pageSize := int64(100)
+	for {
+		res, err := h.ListProjects(ctx, page, pageSize)
+		if err != nil {
+			return err
+		}
+		for _, project := range res.Projects {
+			if strings.HasPrefix(project.Name, cfg.ProjectPrefix+"-") {
+				projectNames = append(projectNames, project.Name)
+			}
+		}
+		if int64(len(res.Projects)) < pageSize {
+			break
+		}
+		page++
+	}
+
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
 
-	for i := 0; i < cfg.ProjectsCount; i++ {
-		name := harbor.GetProjectName(cfg, i)
+	for _, projectName := range projectNames {
+		projectName := projectName
 		g.Go(func() error {
-			err := h.DeleteProject(ctx, name, true)
+			err := h.DeleteProject(ctx, projectName, true)
 			if err != nil {
-				log.Debugf("delete project %s: %v", name, err)
+				log.Debugf("delete project %s: %v", projectName, err)
 			}
 			return nil // don't fail on cleanup errors
 		})
@@ -81,13 +117,12 @@ type UserStep struct{}
 func (s *UserStep) Name() string { return "users" }
 
 func (s *UserStep) Verify(ctx context.Context, h *harbor.Client, cfg *config.Config) error {
-	res, err := h.ListUsers(ctx, 1, 1)
+	count, err := countManagedUsers(ctx, h, cfg)
 	if err != nil {
 		return err
 	}
-	// admin user exists by default, so total should be >= UsersCount+1
-	if res.Total < int64(cfg.UsersCount) {
-		return fmt.Errorf("expected >= %d users, got %d", cfg.UsersCount, res.Total)
+	if count < cfg.UsersCount {
+		return fmt.Errorf("expected >= %d managed users, got %d", cfg.UsersCount, count)
 	}
 	return nil
 }
@@ -98,10 +133,11 @@ func (s *UserStep) Run(ctx context.Context, h *harbor.Client, cfg *config.Config
 
 	for i := 0; i < cfg.UsersCount; i++ {
 		username := harbor.GetUsername(cfg, i)
+		managedUsername := username
 		g.Go(func() error {
-			_, err := h.CreateUser(ctx, username, "Harbor12345")
+			_, err := h.CreateUser(ctx, managedUsername, "Harbor12345")
 			if err != nil && !strings.Contains(err.Error(), "409") {
-				return fmt.Errorf("create user %s: %w", username, err)
+				return fmt.Errorf("create user %s: %w", managedUsername, err)
 			}
 			return nil
 		})
@@ -119,7 +155,7 @@ func (s *UserStep) Clean(ctx context.Context, h *harbor.Client, cfg *config.Conf
 			return err
 		}
 		for _, u := range res.Users {
-			if u.Username != "admin" {
+			if u.Username != "admin" && strings.HasPrefix(u.Username, cfg.UserPrefix+"-") {
 				if err := h.DeleteUser(ctx, u.UserID); err != nil {
 					log.Debugf("delete user %s: %v", u.Username, err)
 				}
@@ -139,30 +175,26 @@ type MemberStep struct{}
 
 func (s *MemberStep) Name() string { return "project-members" }
 
-func (s *MemberStep) Verify(_ context.Context, _ *harbor.Client, _ *config.Config) error {
-	// Members are difficult to verify precisely; skip verification
+func (s *MemberStep) Verify(ctx context.Context, h *harbor.Client, cfg *config.Config) error {
+	projectName := harbor.GetProjectName(cfg, 0)
+	res, err := h.ListProjectMembers(ctx, projectName)
+	if err != nil {
+		return err
+	}
+	if res.Total < int64(cfg.ProjectMembersCountPerProject) {
+		return fmt.Errorf("expected >= %d project members in %s, got %d", cfg.ProjectMembersCountPerProject, projectName, res.Total)
+	}
 	return nil
 }
 
 func (s *MemberStep) Run(ctx context.Context, h *harbor.Client, cfg *config.Config, workers int) error {
 	// First, get user IDs
-	userIDs := make([]int64, 0, cfg.UsersCount)
-	page := int64(1)
-	pageSize := int64(100)
-	for {
-		res, err := h.ListUsers(ctx, page, pageSize)
-		if err != nil {
-			return err
-		}
-		for _, u := range res.Users {
-			if u.Username != "admin" {
-				userIDs = append(userIDs, u.UserID)
-			}
-		}
-		if int64(len(res.Users)) < pageSize {
-			break
-		}
-		page++
+	userIDs, err := listManagedUserIDs(ctx, h, cfg)
+	if err != nil {
+		return err
+	}
+	if len(userIDs) == 0 {
+		return fmt.Errorf("no managed users available for member assignment")
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
@@ -175,7 +207,8 @@ func (s *MemberStep) Run(ctx context.Context, h *harbor.Client, cfg *config.Conf
 			membersCount = len(userIDs)
 		}
 		for j := 0; j < membersCount; j++ {
-			userID := userIDs[j]
+			projectName := projectName
+			userID := userIDs[(i+j)%len(userIDs)]
 			g.Go(func() error {
 				_, err := h.CreateProjectMember(ctx, projectName, userID, 1)
 				if err != nil && !strings.Contains(err.Error(), "409") {
@@ -231,6 +264,9 @@ func (s *ArtifactStep) Run(ctx context.Context, h *harbor.Client, cfg *config.Co
 			repoName := harbor.GetRepositoryName(cfg, j)
 			for k := 0; k < cfg.ArtifactsCountPerRepository; k++ {
 				tag := harbor.GetArtifactTag(cfg, k)
+				projectNameCopy := projectName
+				repoNameCopy := repoName
+				tagCopy := tag
 				g.Go(func() error {
 					blobs, err := store.GenerateMany(cfg.BlobSize, cfg.BlobsCountPerArtifact)
 					if err != nil {
@@ -241,12 +277,12 @@ func (s *ArtifactStep) Run(ctx context.Context, h *harbor.Client, cfg *config.Co
 						descs[idx] = *b
 					}
 					_, err = h.Push(ctx, harbor.PushOption{
-						Ref:   fmt.Sprintf("%s/%s:%s", projectName, repoName, tag),
+						Ref:   fmt.Sprintf("%s/%s:%s", projectNameCopy, repoNameCopy, tagCopy),
 						Store: store,
 						Blobs: descs,
 					})
 					if err != nil {
-						log.Debugf("push %s/%s:%s: %v", projectName, repoName, tag, err)
+						log.Debugf("push %s/%s:%s: %v", projectNameCopy, repoNameCopy, tagCopy, err)
 					}
 					return nil
 				})
@@ -267,7 +303,17 @@ type TagStep struct{}
 
 func (s *TagStep) Name() string { return "artifact-tags" }
 
-func (s *TagStep) Verify(_ context.Context, _ *harbor.Client, _ *config.Config) error {
+func (s *TagStep) Verify(ctx context.Context, h *harbor.Client, cfg *config.Config) error {
+	projectName := harbor.GetProjectName(cfg, 0)
+	repoName := harbor.GetRepositoryName(cfg, 0)
+	baseTag := harbor.GetArtifactTag(cfg, 0)
+	tags, err := h.ListArtifactTags(ctx, projectName, repoName, baseTag, true, true)
+	if err != nil {
+		return err
+	}
+	if len(tags) < cfg.ArtifactTagsCountPerArtifact {
+		return fmt.Errorf("expected >= %d tags for %s/%s:%s, got %d", cfg.ArtifactTagsCountPerArtifact, projectName, repoName, baseTag, len(tags))
+	}
 	return nil
 }
 
@@ -287,10 +333,14 @@ func (s *TagStep) Run(ctx context.Context, h *harbor.Client, cfg *config.Config,
 				baseTag := harbor.GetArtifactTag(cfg, k)
 				for t := 1; t < cfg.ArtifactTagsCountPerArtifact; t++ {
 					newTag := fmt.Sprintf("%sp%s", baseTag, harbor.NumberToPadString(t, cfg.ArtifactTagsCountPerArtifact))
+					projectNameCopy := projectName
+					repoNameCopy := repoName
+					baseTagCopy := baseTag
+					newTagCopy := newTag
 					g.Go(func() error {
-						_, err := h.CreateArtifactTag(ctx, projectName, repoName, baseTag, newTag)
+						_, err := h.CreateArtifactTag(ctx, projectNameCopy, repoNameCopy, baseTagCopy, newTagCopy)
 						if err != nil {
-							log.Debugf("create tag %s: %v", newTag, err)
+							log.Debugf("create tag %s: %v", newTagCopy, err)
 						}
 						return nil
 					})
@@ -322,12 +372,38 @@ func (s *AuditLogStep) Verify(ctx context.Context, h *harbor.Client, cfg *config
 	return nil
 }
 
-func (s *AuditLogStep) Run(_ context.Context, _ *harbor.Client, _ *config.Config, _ int) error {
-	// Audit logs are generated as a side effect of other operations
-	// The k6 version does explicit API calls to generate them, but
-	// for the Go version, the prepare steps above generate enough logs
-	fmt.Printf("    audit logs are generated as side effects of other prepare steps\n")
-	return nil
+func (s *AuditLogStep) Run(ctx context.Context, h *harbor.Client, cfg *config.Config, workers int) error {
+	res, err := h.ListAuditLogs(ctx, 1, 1)
+	if err != nil {
+		return err
+	}
+
+	remaining := cfg.AuditLogsCount - int(res.Total)
+	if remaining <= 0 {
+		fmt.Printf("    audit log target already satisfied\n")
+		return nil
+	}
+
+	refs := buildManagedArtifactRefs(cfg)
+	if len(refs) == 0 {
+		return fmt.Errorf("no artifact references available to generate audit logs")
+	}
+
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
+
+	for i := 0; i < remaining; i++ {
+		ref := refs[i%len(refs)]
+		g.Go(func() error {
+			_, err := h.GetManifest(ctx, ref)
+			if err != nil {
+				return fmt.Errorf("get manifest %s: %w", ref, err)
+			}
+			return nil
+		})
+	}
+
+	return g.Wait()
 }
 
 func (s *AuditLogStep) Clean(_ context.Context, _ *harbor.Client, _ *config.Config, _ int) error {
@@ -340,22 +416,129 @@ type VulnerabilityStep struct{}
 
 func (s *VulnerabilityStep) Name() string { return "vulnerability-scans" }
 
-func (s *VulnerabilityStep) Verify(_ context.Context, _ *harbor.Client, _ *config.Config) error {
+func (s *VulnerabilityStep) Verify(ctx context.Context, h *harbor.Client, cfg *config.Config) error {
+	if cfg.ScannerURL == "" {
+		return nil
+	}
+
+	metrics, err := h.GetScanAllMetrics(ctx)
+	if err != nil {
+		return err
+	}
+	if metrics.Ongoing || metrics.Total == 0 {
+		return fmt.Errorf("scan-all metrics are not ready yet")
+	}
 	return nil
 }
 
-func (s *VulnerabilityStep) Run(_ context.Context, _ *harbor.Client, _ *config.Config, _ int) error {
-	// Vulnerability scanning requires scanner configuration
-	// Skip if no scanner URL is configured
-	scannerURL := os.Getenv("SCANNER_URL")
-	if scannerURL == "" {
+func (s *VulnerabilityStep) Run(ctx context.Context, h *harbor.Client, cfg *config.Config, _ int) error {
+	if cfg.ScannerURL == "" {
 		fmt.Printf("    no SCANNER_URL configured, skipping vulnerability scanning\n")
 		return nil
 	}
-	fmt.Printf("    vulnerability scanning not yet implemented in Go runner\n")
-	return nil
+
+	name := fmt.Sprintf("scanner-%d", time.Now().UnixMilli())
+	urlValue := strfmt.URI(cfg.ScannerURL)
+	scannerID, err := h.CreateScanner(ctx, &models.ScannerRegistrationReq{
+		Name: &name,
+		URL:  &urlValue,
+	})
+	if err != nil {
+		return err
+	}
+	if err := h.SetScannerAsDefault(ctx, scannerID); err != nil {
+		return err
+	}
+	if err := h.StartScanAll(ctx); err != nil {
+		return err
+	}
+
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		metrics, err := h.GetScanAllMetrics(ctx)
+		if err != nil {
+			return err
+		}
+		if !metrics.Ongoing {
+			return nil
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	return fmt.Errorf("scan-all did not finish within 10m")
 }
 
 func (s *VulnerabilityStep) Clean(_ context.Context, _ *harbor.Client, _ *config.Config, _ int) error {
 	return nil
+}
+
+func countManagedProjects(ctx context.Context, h *harbor.Client, cfg *config.Config) (int, error) {
+	page := int64(1)
+	pageSize := int64(100)
+	count := 0
+
+	for {
+		res, err := h.ListProjects(ctx, page, pageSize)
+		if err != nil {
+			return 0, err
+		}
+		for _, project := range res.Projects {
+			if strings.HasPrefix(project.Name, cfg.ProjectPrefix+"-") {
+				count++
+			}
+		}
+		if int64(len(res.Projects)) < pageSize {
+			break
+		}
+		page++
+	}
+
+	return count, nil
+}
+
+func countManagedUsers(ctx context.Context, h *harbor.Client, cfg *config.Config) (int, error) {
+	userIDs, err := listManagedUserIDs(ctx, h, cfg)
+	if err != nil {
+		return 0, err
+	}
+	return len(userIDs), nil
+}
+
+func listManagedUserIDs(ctx context.Context, h *harbor.Client, cfg *config.Config) ([]int64, error) {
+	page := int64(1)
+	pageSize := int64(100)
+	userIDs := make([]int64, 0, cfg.UsersCount)
+
+	for {
+		res, err := h.ListUsers(ctx, page, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		for _, u := range res.Users {
+			if strings.HasPrefix(u.Username, cfg.UserPrefix+"-") {
+				userIDs = append(userIDs, u.UserID)
+			}
+		}
+		if int64(len(res.Users)) < pageSize {
+			break
+		}
+		page++
+	}
+
+	return userIDs, nil
+}
+
+func buildManagedArtifactRefs(cfg *config.Config) []string {
+	refs := make([]string, 0, cfg.ProjectsCount*cfg.RepositoriesCountPerProject*cfg.ArtifactsCountPerRepository)
+	for i := 0; i < cfg.ProjectsCount; i++ {
+		projectName := harbor.GetProjectName(cfg, i)
+		for j := 0; j < cfg.RepositoriesCountPerProject; j++ {
+			repoName := harbor.GetRepositoryName(cfg, j)
+			for k := 0; k < cfg.ArtifactsCountPerRepository; k++ {
+				tag := harbor.GetArtifactTag(cfg, k)
+				refs = append(refs, fmt.Sprintf("%s/%s:%s", projectName, repoName, tag))
+			}
+		}
+	}
+	return refs
 }

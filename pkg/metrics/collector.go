@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -127,6 +128,11 @@ func (s *SummaryResult) WriteRunJSON(outputDir, scenarioName string, runMeta *Ru
 		"startTime": runMeta.StartTime,
 		"endTime":   time.Now(),
 		"duration":  s.Duration.String(),
+		"dataset": map[string]interface{}{
+			"profile":     runMeta.Profile,
+			"policy":      runMeta.DatasetPolicy,
+			"fingerprint": runMeta.DatasetFingerprint,
+		},
 		"metrics": map[string]interface{}{
 			"avg":            s.Avg.Milliseconds(),
 			"min":            s.Min.Milliseconds(),
@@ -151,9 +157,12 @@ func (s *SummaryResult) WriteRunJSON(outputDir, scenarioName string, runMeta *Ru
 
 // RunMeta holds metadata about a run for the detailed output.
 type RunMeta struct {
-	Workers    int       `json:"workers"`
-	Iterations int       `json:"iterations"`
-	StartTime  time.Time `json:"startTime"`
+	Workers            int       `json:"workers"`
+	Iterations         int       `json:"iterations"`
+	StartTime          time.Time `json:"startTime"`
+	Profile            string    `json:"profile,omitempty"`
+	DatasetPolicy      string    `json:"datasetPolicy,omitempty"`
+	DatasetFingerprint string    `json:"datasetFingerprint,omitempty"`
 }
 
 // PrintSummary prints a human-readable summary to stdout.
@@ -197,15 +206,18 @@ func percentile(sorted []time.Duration, pct float64) time.Duration {
 func toHumanDuration(d time.Duration) string {
 	ms := float64(d) / float64(time.Millisecond)
 	if ms < 1000 {
-		// Truncate to 2 decimal places like the JS version
 		ms = math.Floor(ms*100) / 100
-		return fmt.Sprintf("%.2gms", ms)
+		return fmt.Sprintf("%sms", trimFloat(ms))
 	}
 	s := math.Floor((ms/1000)*100) / 100
-	return fmt.Sprintf("%.2gs", s)
+	return fmt.Sprintf("%ss", trimFloat(s))
 }
 
 func toHumanRate(rate float64) string {
 	pct := math.Floor((rate*100)*100) / 100
-	return fmt.Sprintf("%.2g%%", pct)
+	return fmt.Sprintf("%s%%", trimFloat(pct))
+}
+
+func trimFloat(v float64) string {
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", v), "0"), ".")
 }

@@ -2,9 +2,11 @@ package config
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -17,19 +19,22 @@ type Config struct {
 	Iterations int
 
 	// Size-derived values
-	ProjectsCount               int
-	RepositoriesCountPerProject int
-	ArtifactsCountPerRepository int
-	ArtifactTagsCountPerArtifact int
-	UsersCount                  int
+	ProjectsCount                 int
+	RepositoriesCountPerProject   int
+	ArtifactsCountPerRepository   int
+	ArtifactTagsCountPerArtifact  int
+	UsersCount                    int
 	ProjectMembersCountPerProject int
-	AuditLogsCount              int
-	BlobSize                    string
-	BlobsCountPerArtifact       int
+	AuditLogsCount                int
+	BlobSize                      string
+	BlobsCountPerArtifact         int
 
 	// Naming
-	ProjectPrefix string
-	UserPrefix    string
+	ProjectPrefix      string
+	UserPrefix         string
+	ScannerURL         string
+	FakeScannerURL     string
+	AutoSBOMGeneration bool
 
 	// Output
 	OutputDir     string
@@ -70,45 +75,113 @@ const (
 
 // DatasetFingerprint uniquely identifies a dataset configuration.
 type DatasetFingerprint struct {
-	SizePreset               string `json:"sizePreset"`
-	Projects                 int    `json:"projects"`
-	ReposPerProject          int    `json:"reposPerProject"`
-	ArtifactsPerRepo         int    `json:"artifactsPerRepo"`
-	TagsPerArtifact          int    `json:"tagsPerArtifact"`
-	Users                    int    `json:"users"`
-	MembersPerProject        int    `json:"membersPerProject"`
-	Hash                     string `json:"hash"`
+	SizePreset         string `json:"sizePreset"`
+	ProjectPrefix      string `json:"projectPrefix"`
+	UserPrefix         string `json:"userPrefix"`
+	Projects           int    `json:"projects"`
+	ReposPerProject    int    `json:"reposPerProject"`
+	ArtifactsPerRepo   int    `json:"artifactsPerRepo"`
+	TagsPerArtifact    int    `json:"tagsPerArtifact"`
+	Users              int    `json:"users"`
+	MembersPerProject  int    `json:"membersPerProject"`
+	AuditLogs          int    `json:"auditLogs"`
+	BlobSize           string `json:"blobSize"`
+	BlobsPerArtifact   int    `json:"blobsPerArtifact"`
+	ScannerURL         string `json:"scannerURL,omitempty"`
+	FakeScannerURL     string `json:"fakeScannerURL,omitempty"`
+	AutoSBOMGeneration bool   `json:"autoSBOMGeneration"`
+	Hash               string `json:"hash"`
+}
+
+// DatasetMetadata is the persisted dataset contract for a run directory.
+type DatasetMetadata struct {
+	Profile     string             `json:"profile"`
+	Policy      string             `json:"policy"`
+	Fingerprint DatasetFingerprint `json:"fingerprint"`
+	Contract    map[string]any     `json:"contract"`
 }
 
 // Fingerprint returns a DatasetFingerprint for the current config.
 func (c *Config) Fingerprint() DatasetFingerprint {
 	fp := DatasetFingerprint{
-		SizePreset:        string(c.Size),
-		Projects:          c.ProjectsCount,
-		ReposPerProject:   c.RepositoriesCountPerProject,
-		ArtifactsPerRepo:  c.ArtifactsCountPerRepository,
-		TagsPerArtifact:   c.ArtifactTagsCountPerArtifact,
-		Users:             c.UsersCount,
-		MembersPerProject: c.ProjectMembersCountPerProject,
+		SizePreset:         string(c.Size),
+		ProjectPrefix:      c.ProjectPrefix,
+		UserPrefix:         c.UserPrefix,
+		Projects:           c.ProjectsCount,
+		ReposPerProject:    c.RepositoriesCountPerProject,
+		ArtifactsPerRepo:   c.ArtifactsCountPerRepository,
+		TagsPerArtifact:    c.ArtifactTagsCountPerArtifact,
+		Users:              c.UsersCount,
+		MembersPerProject:  c.ProjectMembersCountPerProject,
+		AuditLogs:          c.AuditLogsCount,
+		BlobSize:           c.BlobSize,
+		BlobsPerArtifact:   c.BlobsCountPerArtifact,
+		ScannerURL:         c.ScannerURL,
+		FakeScannerURL:     c.FakeScannerURL,
+		AutoSBOMGeneration: c.AutoSBOMGeneration,
 	}
-	data := fmt.Sprintf("%s:%d:%d:%d:%d:%d:%d",
-		fp.SizePreset, fp.Projects, fp.ReposPerProject, fp.ArtifactsPerRepo,
-		fp.TagsPerArtifact, fp.Users, fp.MembersPerProject,
+	data := fmt.Sprintf("%s:%s:%s:%d:%d:%d:%d:%d:%d:%d:%s:%d:%s:%s:%t",
+		fp.SizePreset, fp.ProjectPrefix, fp.UserPrefix,
+		fp.Projects, fp.ReposPerProject, fp.ArtifactsPerRepo,
+		fp.TagsPerArtifact, fp.Users, fp.MembersPerProject, fp.AuditLogs,
+		fp.BlobSize, fp.BlobsPerArtifact, fp.ScannerURL, fp.FakeScannerURL, fp.AutoSBOMGeneration,
 	)
 	fp.Hash = fmt.Sprintf("%x", sha256.Sum256([]byte(data)))
 	return fp
+}
+
+// DatasetMetadata returns the dataset contract for this config.
+func (c *Config) DatasetMetadata() DatasetMetadata {
+	return DatasetMetadata{
+		Profile:     string(c.Size),
+		Policy:      string(c.DatasetPolicy),
+		Fingerprint: c.Fingerprint(),
+		Contract: map[string]any{
+			"project_prefix":              c.ProjectPrefix,
+			"user_prefix":                 c.UserPrefix,
+			"projects":                    c.ProjectsCount,
+			"repositories_per_project":    c.RepositoriesCountPerProject,
+			"artifacts_per_repository":    c.ArtifactsCountPerRepository,
+			"artifact_tags_per_artifact":  c.ArtifactTagsCountPerArtifact,
+			"users":                       c.UsersCount,
+			"project_members_per_project": c.ProjectMembersCountPerProject,
+			"audit_logs":                  c.AuditLogsCount,
+			"blob_size":                   c.BlobSize,
+			"blobs_per_artifact":          c.BlobsCountPerArtifact,
+			"scanner_url":                 c.ScannerURL,
+			"fake_scanner_url":            c.FakeScannerURL,
+			"auto_sbom_generation":        c.AutoSBOMGeneration,
+		},
+	}
+}
+
+// WriteDatasetJSON persists dataset metadata into the output directory.
+func (c *Config) WriteDatasetJSON(outputDir string) error {
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(c.DatasetMetadata(), "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(outputDir, "dataset.json"), data, 0644)
 }
 
 // Load reads configuration from environment variables with the same interface
 // as the existing k6-based system.
 func Load() (*Config, error) {
 	cfg := &Config{
-		ProjectPrefix: getEnv("PROJECT_PREFIX", "project"),
-		UserPrefix:    getEnv("USER_PREFIX", "user"),
-		OutputDir:     getEnv("HARBOR_OUTPUT_DIR", "./outputs"),
-		CSVOutput:     getEnvBool("K6_CSV_OUTPUT"),
-		JSONOutput:    getEnvBool("K6_JSON_OUTPUT"),
-		ReportEnabled: getEnvBool("HARBOR_REPORT"),
+		ProjectPrefix:      getEnv("PROJECT_PREFIX", "project"),
+		UserPrefix:         getEnv("USER_PREFIX", "user"),
+		ScannerURL:         getEnv("SCANNER_URL", ""),
+		FakeScannerURL:     getEnv("FAKE_SCANNER_URL", ""),
+		AutoSBOMGeneration: getEnvBool("AUTO_SBOM_GENERATION"),
+		OutputDir:          getEnv("HARBOR_OUTPUT_DIR", "./outputs"),
+		CSVOutput:          getEnvBool("K6_CSV_OUTPUT"),
+		JSONOutput:         getEnvBool("K6_JSON_OUTPUT"),
+		ReportEnabled:      getEnvBool("HARBOR_REPORT"),
 	}
 
 	// Parse Harbor URL or individual components

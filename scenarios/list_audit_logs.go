@@ -2,6 +2,7 @@ package scenarios
 
 import (
 	"context"
+	"fmt"
 	"math"
 
 	"github.com/goharbor/perf/pkg/config"
@@ -23,6 +24,9 @@ func (s *ListAuditLogs) Setup(ctx context.Context, h *harbor.Client) (runner.Sha
 	res, err := h.ListAuditLogs(ctx, 1, 1)
 	if err != nil {
 		return nil, err
+	}
+	if res.Total == 0 {
+		return nil, fmt.Errorf("no audit logs available; run harborperf prepare after audit-log generation is fixed")
 	}
 	return &listAuditLogsData{total: res.Total}, nil
 }

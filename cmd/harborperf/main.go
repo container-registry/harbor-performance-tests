@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/goharbor/perf/pkg/config"
@@ -30,10 +31,7 @@ func main() {
 		Use:   "list",
 		Short: "List available test scenarios",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
+			cfg := &config.Config{}
 			for _, name := range scenarios.Names(cfg) {
 				fmt.Println(name)
 			}
@@ -68,7 +66,13 @@ func main() {
 
 			fmt.Printf("Preparing data (size=%s, policy=%s, workers=%d)\n",
 				cfg.Size, cfg.DatasetPolicy, workers)
-			return prepare.Execute(ctx, client, cfg, workers)
+			if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
+				return err
+			}
+			if err := prepare.Execute(ctx, client, cfg, workers); err != nil {
+				return err
+			}
+			return cfg.WriteDatasetJSON(cfg.OutputDir)
 		},
 	}
 
@@ -116,6 +120,9 @@ func main() {
 			if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
 				return err
 			}
+			if err := cfg.WriteDatasetJSON(cfg.OutputDir); err != nil {
+				return err
+			}
 
 			var toRun []runner.Scenario
 			if len(args) > 0 {
@@ -137,34 +144,51 @@ func main() {
 				Iterations: cfg.Iterations,
 			}
 
-			startTime := time.Now()
-
 			fmt.Printf("Running %d scenarios (vus=%d, iterations=%d)\n",
 				len(toRun), sched.Workers, sched.Iterations)
 
+			var failedScenarios []string
 			for _, s := range toRun {
+				startTime := time.Now()
 				summary, err := runner.RunScenario(ctx, client, s, sched)
+				if summary != nil {
+					if err := summary.WriteSummaryJSON(cfg.OutputDir, s.Name()); err != nil {
+						fmt.Fprintf(os.Stderr, "write summary %s: %v\n", s.Name(), err)
+						failedScenarios = append(failedScenarios, s.Name())
+					}
+
+					runMeta := &metrics.RunMeta{
+						Workers:            sched.Workers,
+						Iterations:         sched.Iterations,
+						StartTime:          startTime,
+						Profile:            string(cfg.Size),
+						DatasetPolicy:      string(cfg.DatasetPolicy),
+						DatasetFingerprint: cfg.Fingerprint().Hash,
+					}
+					if writeErr := summary.WriteRunJSON(cfg.OutputDir, s.Name(), runMeta); writeErr != nil {
+						fmt.Fprintf(os.Stderr, "write run result %s: %v\n", s.Name(), writeErr)
+						failedScenarios = append(failedScenarios, s.Name())
+					}
+
+					if summary.TotalFailure > 0 {
+						failedScenarios = append(failedScenarios, s.Name())
+					}
+				}
+
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "ERROR %s: %v\n", s.Name(), err)
-					continue
-				}
-
-				if err := summary.WriteSummaryJSON(cfg.OutputDir, s.Name()); err != nil {
-					fmt.Fprintf(os.Stderr, "write summary %s: %v\n", s.Name(), err)
-				}
-
-				runMeta := &metrics.RunMeta{
-					Workers:    sched.Workers,
-					Iterations: sched.Iterations,
-					StartTime:  startTime,
-				}
-				if err := summary.WriteRunJSON(cfg.OutputDir, s.Name(), runMeta); err != nil {
-					fmt.Fprintf(os.Stderr, "write run result %s: %v\n", s.Name(), err)
+					failedScenarios = append(failedScenarios, s.Name())
 				}
 			}
 
 			if cfg.ReportEnabled {
-				return report.MarkdownReport()
+				if err := report.MarkdownReport(); err != nil {
+					return err
+				}
+			}
+
+			if len(failedScenarios) > 0 {
+				return fmt.Errorf("scenarios failed: %s", joinUnique(failedScenarios))
 			}
 
 			return nil
@@ -187,4 +211,17 @@ func main() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func joinUnique(items []string) string {
+	seen := make(map[string]bool, len(items))
+	unique := make([]string, 0, len(items))
+	for _, item := range items {
+		if seen[item] {
+			continue
+		}
+		seen[item] = true
+		unique = append(unique, item)
+	}
+	return strings.Join(unique, ", ")
 }

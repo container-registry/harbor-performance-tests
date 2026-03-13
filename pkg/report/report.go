@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -24,8 +25,8 @@ type Summary struct {
 	Description    string `json:"description"`
 	Avg            string `json:"avg"`
 	Min            string `json:"min"`
-	Med            string `json:"Med"`
-	Max            string `json:"Max"`
+	Med            string `json:"med"`
+	Max            string `json:"max"`
 	P90            string `json:"p90"`
 	P95            string `json:"p95"`
 	SuccessRate    string `json:"successRate"`
@@ -34,7 +35,9 @@ type Summary struct {
 
 // MarkdownReport generates testing report with markdown format.
 func MarkdownReport() error {
-	summaries, err := filepath.Glob("./outputs/*.summary.json")
+	outputDir := outputDir()
+
+	summaries, err := filepath.Glob(filepath.Join(outputDir, "*.summary.json"))
 	if err != nil {
 		return err
 	}
@@ -66,5 +69,12 @@ func MarkdownReport() error {
 	fmt.Printf("\n\n")
 	fmt.Println(string(markdown.Render(md.String(), 120, 10)))
 	// write report
-	return ioutil.WriteFile("./outputs/report.md", []byte(md.String()), 0666)
+	return ioutil.WriteFile(filepath.Join(outputDir, "report.md"), []byte(md.String()), 0666)
+}
+
+func outputDir() string {
+	if dir := os.Getenv("HARBOR_OUTPUT_DIR"); dir != "" {
+		return dir
+	}
+	return "./outputs"
 }

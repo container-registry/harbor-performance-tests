@@ -49,6 +49,19 @@ func RunScenario(ctx context.Context, h *harbor.Client, scenario Scenario, sched
 
 	collector := metrics.NewCollector()
 	var iterCounter atomic.Int64
+	var firstErr error
+	var errMu sync.Mutex
+
+	recordErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		errMu.Unlock()
+	}
 
 	// Apply timeout if set
 	runCtx := ctx
@@ -64,10 +77,16 @@ func RunScenario(ctx context.Context, h *harbor.Client, scenario Scenario, sched
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					recordErr(fmt.Errorf("worker panic in %s: %v", name, r))
+				}
+			}()
 
 			// InitWorker (per-goroutine)
 			state, err := scenario.InitWorker(runCtx, h, data)
 			if err != nil {
+				recordErr(fmt.Errorf("initWorker %s: %w", name, err))
 				log.Errorf("initWorker %s: %v", name, err)
 				return
 			}
@@ -83,11 +102,20 @@ func RunScenario(ctx context.Context, h *harbor.Client, scenario Scenario, sched
 				}
 
 				start := time.Now()
-				err := scenario.Run(runCtx, h, data, state)
+				var err error
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							err = fmt.Errorf("iteration panic in %s: %v", name, r)
+						}
+					}()
+					err = scenario.Run(runCtx, h, data, state)
+				}()
 				elapsed := time.Since(start)
 				collector.Record(elapsed, err == nil)
 
 				if err != nil {
+					recordErr(err)
 					log.Debugf("%s iteration %d: %v", name, i, err)
 				}
 			}
@@ -106,7 +134,7 @@ func RunScenario(ctx context.Context, h *harbor.Client, scenario Scenario, sched
 	summary := collector.Summary()
 	summary.PrintSummary(name)
 
-	return summary, nil
+	return summary, firstErr
 }
 
 // --- Scenario composition types (defined for future use) ---

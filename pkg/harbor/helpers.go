@@ -10,11 +10,18 @@ import (
 
 // RandomItem returns a random element from a slice.
 func RandomItem[T any](items []T) T {
+	if len(items) == 0 {
+		var zero T
+		return zero
+	}
 	return items[rand.IntN(len(items))]
 }
 
 // RandomIntBetween returns a random int in [min, max] inclusive.
 func RandomIntBetween(min, max int) int {
+	if max <= min {
+		return min
+	}
 	return min + rand.IntN(max-min+1)
 }
 

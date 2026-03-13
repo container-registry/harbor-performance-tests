@@ -16,8 +16,18 @@ import (
 	"github.com/go-echarts/go-echarts/v2/opts"
 )
 
+type datasetMetadata struct {
+	Fingerprint struct {
+		Hash string `json:"hash"`
+	} `json:"fingerprint"`
+}
+
 // Compare compares result and render plot.
 func Compare(dirs ...string) error {
+	if err := validateDatasetFingerprints(dirs...); err != nil {
+		return err
+	}
+
 	// summaries for API
 	apiSummaries := make(map[string][]*Summary)
 	// summaries for pull/push
@@ -65,7 +75,7 @@ func Compare(dirs ...string) error {
 		return err
 	}
 
-	if err = renderChart(apiBar, "./outputs/api-comparison.html", "API", apiSummaries, dirs...); err != nil {
+	if err = renderChart(apiBar, filepath.Join(outputDir(), "api-comparison.html"), "API", apiSummaries, dirs...); err != nil {
 		return err
 	}
 
@@ -74,8 +84,47 @@ func Compare(dirs ...string) error {
 		return err
 	}
 
-	if err = renderChart(pullBar, "./outputs/pull-push-comparison.html", "PULL/PUSH", pullSummaries, dirs...); err != nil {
+	if err = renderChart(pullBar, filepath.Join(outputDir(), "pull-push-comparison.html"), "PULL/PUSH", pullSummaries, dirs...); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func validateDatasetFingerprints(paths ...string) error {
+	fingerprints := make([]string, 0, len(paths))
+
+	for _, path := range paths {
+		data, err := os.ReadFile(filepath.Join(path, "dataset.json"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+
+		var metadata datasetMetadata
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			return fmt.Errorf("parse dataset metadata for %s: %w", path, err)
+		}
+		if metadata.Fingerprint.Hash == "" {
+			return fmt.Errorf("dataset fingerprint missing for %s", path)
+		}
+		fingerprints = append(fingerprints, metadata.Fingerprint.Hash)
+	}
+
+	if len(fingerprints) == 0 {
+		return nil
+	}
+	if len(fingerprints) != len(paths) {
+		return fmt.Errorf("cannot compare runs with incomplete dataset metadata")
+	}
+
+	expected := fingerprints[0]
+	for i := 1; i < len(fingerprints); i++ {
+		if fingerprints[i] != expected {
+			return fmt.Errorf("dataset fingerprint mismatch: %s != %s", expected, fingerprints[i])
+		}
 	}
 
 	return nil
@@ -235,7 +284,7 @@ func renderChart(bar *charts.Bar, filename, xAxisName string, summaries map[stri
 			SplitLine: &opts.SplitLine{Show: false},
 		}),
 		charts.WithYAxisOpts(opts.YAxis{
-			Name: "P95 (seconds)",
+			Name:      "P95 (seconds)",
 			AxisLabel: &opts.AxisLabel{Color: "#64748b"},
 			SplitLine: &opts.SplitLine{Show: true, LineStyle: &opts.LineStyle{Color: "#1a1f2e"}},
 		}),

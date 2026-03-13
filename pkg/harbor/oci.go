@@ -108,6 +108,37 @@ func (c *Client) Pull(ctx context.Context, ref string) error {
 	return nil
 }
 
+// GetManifest fetches and decodes a manifest. It is primarily used during
+// dataset preparation to generate Harbor audit log volume.
+func (c *Client) GetManifest(ctx context.Context, ref string) (map[string]interface{}, error) {
+	ref = c.getRef(ref)
+
+	repo, err := c.newRemoteRepository(ref)
+	if err != nil {
+		return nil, fmt.Errorf("create remote repository: %w", err)
+	}
+
+	tagOrDigest := extractTagOrDigest(ref)
+
+	desc, err := repo.Resolve(ctx, tagOrDigest)
+	if err != nil {
+		return nil, fmt.Errorf("resolve manifest %s: %w", ref, err)
+	}
+
+	rc, err := repo.Fetch(ctx, desc)
+	if err != nil {
+		return nil, fmt.Errorf("fetch manifest %s: %w", ref, err)
+	}
+	defer rc.Close()
+
+	decoded := map[string]interface{}{}
+	if err := json.NewDecoder(rc).Decode(&decoded); err != nil {
+		return nil, fmt.Errorf("decode manifest %s: %w", ref, err)
+	}
+
+	return decoded, nil
+}
+
 func (c *Client) getRef(ref string) string {
 	if !strings.HasPrefix(ref, c.Host) {
 		return c.Host + "/" + ref
