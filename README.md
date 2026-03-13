@@ -1,118 +1,290 @@
-# perf
+# Harbor Performance Tests
 
-This repository includes scripts for the performance test of harbor.
+This repository contains a Go-native performance test framework for Harbor.
 
+The current runner is `harborperf`, a single CLI that:
 
-If you see performance problems please open an issue in repo:
-[goharbor/harbor](https://github.com/goharbor/harbor)
+- prepares benchmark data on a target Harbor instance
+- runs Harbor-specific benchmark scenarios
+- writes structured JSON results
+- generates markdown and HTML comparison reports
 
+If you see Harbor performance issues, open an issue in [goharbor/harbor](https://github.com/goharbor/harbor).
 
-## How to run the performance tests
+## High-Level Architecture
 
-To run performance tests for the target harbor instance, first ensure you have the prerequisites:
+`harborperf` is organized around Harbor workflows rather than generic HTTP load generation.
 
-- [Go toolchain](https://go101.org/article/go-toolchain.html)
-- Git
+### Main components
 
-Then:
+- `cmd/harborperf`
+  CLI entrypoint with `list`, `prepare`, `run`, `compare`, and `cleanup`
+- `pkg/config`
+  Environment-driven configuration, size presets, output paths, dataset policy
+- `pkg/harbor`
+  Native Harbor API and OCI push/pull client code
+- `pkg/prepare`
+  Dataset preparation pipeline: projects, users, members, artifacts, tags, audit logs, vulnerability prep
+- `pkg/runner`
+  Scenario lifecycle runner with setup, per-worker execution, teardown, and metrics collection
+- `pkg/metrics`
+  Latency summaries, success rate, throughput, summary JSON, and run metadata
+- `pkg/report`
+  Markdown report generation and HTML comparison charts
+- `scenarios`
+  Built-in Harbor benchmark scenarios
+- `xk6-harbor`
+  In-repo source of generated Harbor API types and client code reused by the native runner
 
-1. Clone this repostiroy and generate client from swagger
-  ```shell
-  git clone https://github.com/goharbor/perf
-  cd perf
-  ```
+### Execution model
 
-2. Prepare user data
-  ```shell
-  export HARBOR_URL=https://admin:password@harbor.domain
-  export HARBOR_SIZE=small
-  go run mage.go prepare
-  ```
+Each scenario follows the same lifecycle:
 
-3. Run all tests
-  ```shell
-  export HARBOR_URL=https://admin:password@harbor.domain
-  export HARBOR_VUS=100
-  export HARBOR_ITERATIONS=200
-  go run mage.go
-  ```
+1. Scenario setup
+2. Worker initialization
+3. Shared-iterations execution with configured workers
+4. Scenario teardown
+5. Summary and detailed result output
 
-## The environment variables and targets
+The current runner uses a closed workload model driven by:
 
-The environment variables in the table are the configurations for the performance testing. Use `VAR1=value1 VAR2=value2 go run mage.go target` format to apply the variables to the testing
+- `HARBOR_VUS`
+- `HARBOR_ITERATIONS`
 
-| Variable          | Description                                                  | Default value |
-| ----------------- | ------------------------------------------------------------ | ------------- |
-| HARBOR_URL        | The url of the harbor will be tested, its format is https?://username:password@harbor.domain |               |
-| HARBOR_SIZE       | The user data size to prepare for the tests                  | small         |
-| HARBOR_VUS        | The number of virtual users for the performance test         | 500           |
-| HARBOR_ITERATIONS | The script total iteration limit (among all VUs) for the performance test | 1000          |
-| K6_ALWAYS_UPDATE  | Always install the latest xk6-harbor                         | false         |
-| K6_QUIET          | Disable progress updates of the k6                           | false         |
-| K6_CSV_OUTPUT     | Make k6 output detailed statistics in a CSV format           | false         |
-| K6_JSON_OUTPUT    | Make k6 output detailed statistics in JSON format            | false         |
-| HARBOR_REPORT     | Whether generate testing report                              | false         |
+### Dataset model
 
-**Experimental** to send the metrics to the prometheus. (Refer to <https://k6.io/docs/results-output/real-time/prometheus-remote-write> for more details)
-| Variable          | Description                                                  | Default value |
-| ----------------- | ------------------------------------------------------------ | ------------- |
-| K6_PROMETHEUS_RW_SERVER_URL | URL of the Prometheus remote write implementation's endpoint |     |
-| K6_PROMETHEUS_RW_USERNAME | User for the HTTP Basic authentication at the Prometheus remote write endpoint | |
-| K6_PROMETHEUS_RW_PASSWORD |  Password for the HTTP Basic authentication at the Prometheus remote write endpoint| |
-| K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM | If true, it maps the all defined trend metrics as Native Histograms | false |
-| K6_PROMETHEUS_RW_TREND_STATS | It's a comma-separated list of stats functions | min,p(90),p(95),p(99),max |
-| K6_PROMETHEUS_RW_INSECURE_SKIP_TLS_VERIFY | If true, the HTTP client skips TLS verification on the endpoint | false |
+Benchmark data is managed by the prepare pipeline and controlled by:
 
+- `HARBOR_SIZE=ci|small|medium`
+- `HARBOR_DATASET_POLICY=fresh|verify|reuse`
 
-The following table includes the targets.
+Every run writes `dataset.json` with the resolved dataset contract and fingerprint. Comparisons use that fingerprint to prevent invalid A/B comparisons.
 
-| Target  | Description                                    | Example                                                                                  |
-| ------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| prepare | Generate user data                             | HARBOR_SIZE=small HARBOR_URL=https://admin:password@harbor.domain go run mage.go prepare |
-| run     | Execute a specific test                        | HARBOR_URL=https://admin:password@harbor.domain go run mage.go run list-projects         |
-| all     | Execute all tasks                              | HARBOR_URL=https://admin:password@harbor.domain go run mage.go all                       |
-| list    | Print all test                                 | go run mage.go list                                                                      |
-| compare | Compare performance                            | go run mage.go compare 251 252                                                           |
+### Result artifacts
 
-## Performance comparison
+Each run writes artifacts into `./outputs` by default:
 
-Compare the performance of harbor different versions, the format of HTML
-comparison bar can be generated easily by subcommand. Before you need to retain
-the outputs folder every time and then rename them to a meaningful name.
+- `dataset.json`
+- `<scenario>.summary.json`
+- `<scenario>.run.json`
+- `report.md` when `HARBOR_REPORT=true`
+- `api-comparison.html` and `pull-push-comparison.html` for comparisons
 
-For example, if we want to compare the performance of harbor 2.5.1 and 2.5.2, we
-can just follow the steps:
+## Prerequisites
 
-1. Deploy harbor 2.5.1, prepare data and run tests
-  ```shell
-    export HARBOR_URL=https://admin:password@harbor.domain
-    export HARBOR_SIZE=small
-    # prepare data
-    go run mage.go prepare
-    # run tests
-    go run mage.go
-    # retain the outputs result
-    mv outputs 251 && mkdir outputs
-  ```
+- Go toolchain
+- A reachable Harbor instance
 
-2. Deploy harbor 2.5.2, prepare data and run tests
+Optional:
 
-  ```shell
-    export HARBOR_URL=https://admin:password@harbor.domain
-    export HARBOR_SIZE=small
-    # prepare data
-    go run mage.go prepare
-    # run tests
-    go run mage.go
-    # retain the outputs result
-    mv outputs 252 && mkdir outputs
-  ```
+- Docker or Kubernetes only if you are provisioning Harbor locally yourself
 
-3. Compare
-  ```shell
-   # use outputs result folder name as parameters
-   go run mage.go compare 251 252
-   # then you can see the comparison in the browser
-   open ./outputs/api-comparison.html
-   open ./outputs/pull-push-comparison.html
-  ```
+## Build
+
+Run directly:
+
+```bash
+go run ./cmd/harborperf list
+```
+
+Or build a binary:
+
+```bash
+go build -o harborperf ./cmd/harborperf
+./harborperf list
+```
+
+## Configuration
+
+The runner is configured through environment variables.
+
+### Required
+
+| Variable | Description |
+|---|---|
+| `HARBOR_URL` | Harbor URL in the form `http(s)://username:password@host` |
+
+### Common
+
+| Variable | Description | Default |
+|---|---|---|
+| `HARBOR_SIZE` | Dataset size preset: `ci`, `small`, `medium` | `small` |
+| `HARBOR_VUS` | Worker count for scenario execution | preset-dependent |
+| `HARBOR_ITERATIONS` | Total iterations shared across all workers | `2 x HARBOR_VUS` |
+| `HARBOR_DATASET_POLICY` | `fresh`, `verify`, or `reuse` | `reuse` |
+| `HARBOR_REPORT` | Generate `report.md` after a run | `false` |
+| `HARBOR_OUTPUT_DIR` | Output directory for run artifacts | `./outputs` |
+| `PROJECT_PREFIX` | Prefix for benchmark projects | `project` |
+| `USER_PREFIX` | Prefix for benchmark users | `user` |
+| `SCANNER_URL` | Scanner endpoint for vulnerability prep | unset |
+| `FAKE_SCANNER_URL` | Fake scanner endpoint used during project prep | unset |
+| `AUTO_SBOM_GENERATION` | Enable automatic SBOM generation on prepared projects | `false` |
+| `BLOB_SIZE` | Blob size used for artifact generation | preset-dependent |
+| `BLOBS_COUNT_PER_ARTIFACT` | Number of blobs per artifact | preset-dependent |
+
+Compatibility aliases still accepted by the current runner:
+
+- `K6_CSV_OUTPUT`
+- `K6_JSON_OUTPUT`
+
+## Commands
+
+### List available scenarios
+
+```bash
+go run ./cmd/harborperf list
+```
+
+### Prepare benchmark data
+
+Reuse existing benchmark-owned data when present:
+
+```bash
+HARBOR_URL=http://admin:Harbor12345@localhost:8080 \
+HARBOR_SIZE=ci \
+HARBOR_DATASET_POLICY=reuse \
+go run ./cmd/harborperf prepare
+```
+
+Recreate benchmark data from scratch:
+
+```bash
+HARBOR_URL=http://admin:Harbor12345@localhost:8080 \
+HARBOR_SIZE=ci \
+HARBOR_DATASET_POLICY=fresh \
+go run ./cmd/harborperf prepare
+```
+
+Verify the expected dataset exists without creating anything:
+
+```bash
+HARBOR_URL=http://admin:Harbor12345@localhost:8080 \
+HARBOR_SIZE=ci \
+HARBOR_DATASET_POLICY=verify \
+go run ./cmd/harborperf prepare
+```
+
+### Run all scenarios
+
+```bash
+HARBOR_URL=http://admin:Harbor12345@localhost:8080 \
+HARBOR_SIZE=ci \
+HARBOR_VUS=10 \
+HARBOR_ITERATIONS=10 \
+HARBOR_REPORT=true \
+go run ./cmd/harborperf run
+```
+
+### Run only API scenarios
+
+```bash
+HARBOR_URL=http://admin:Harbor12345@localhost:8080 \
+HARBOR_SIZE=ci \
+HARBOR_VUS=10 \
+HARBOR_ITERATIONS=10 \
+go run ./cmd/harborperf run --api-only
+```
+
+### Run specific scenarios
+
+```bash
+HARBOR_URL=http://admin:Harbor12345@localhost:8080 \
+HARBOR_SIZE=ci \
+HARBOR_VUS=20 \
+HARBOR_ITERATIONS=100 \
+go run ./cmd/harborperf run list-projects get-project
+```
+
+### Cleanup benchmark-owned data
+
+```bash
+HARBOR_URL=http://admin:Harbor12345@localhost:8080 \
+HARBOR_SIZE=ci \
+go run ./cmd/harborperf cleanup
+```
+
+### Compare two result directories
+
+```bash
+go run ./cmd/harborperf compare ./results/run-a ./results/run-b
+```
+
+The compare command expects both directories to contain:
+
+- `dataset.json`
+- `*.summary.json`
+
+It refuses to compare runs when dataset fingerprints do not match.
+
+## Current Built-In Scenarios
+
+Use `harborperf list` for the source of truth. The built-in set currently includes:
+
+- `get-artifact-by-digest`
+- `get-artifact-by-tag`
+- `get-catalog`
+- `get-project`
+- `get-repository`
+- `get-v2`
+- `list-artifact-tags`
+- `list-artifacts`
+- `list-audit-logs`
+- `list-project-logs`
+- `list-project-members`
+- `list-projects`
+- `list-quotas`
+- `list-repositories`
+- `list-users`
+- `pull-artifacts-from-different-projects`
+- `pull-artifacts-from-same-project`
+- `push-artifacts-to-different-projects`
+- `push-artifacts-to-same-project`
+- `search-users`
+
+## CI/CD Usage
+
+The same commands used locally are intended to run in CI:
+
+1. `harborperf prepare`
+2. `harborperf run`
+3. archive the output directory
+4. optionally run `harborperf compare` against a stored baseline
+
+Recommended CI environment for a short validation run:
+
+```bash
+HARBOR_SIZE=ci
+HARBOR_VUS=10
+HARBOR_ITERATIONS=10
+HARBOR_DATASET_POLICY=fresh
+HARBOR_REPORT=true
+```
+
+## Example Local Workflow
+
+Against a local Harbor on `localhost:8080`:
+
+```bash
+export HARBOR_URL=http://admin:Harbor12345@localhost:8080
+export HARBOR_SIZE=ci
+export HARBOR_VUS=10
+export HARBOR_ITERATIONS=10
+export HARBOR_REPORT=true
+
+go run ./cmd/harborperf prepare
+go run ./cmd/harborperf run --api-only
+```
+
+Then inspect the outputs:
+
+```bash
+ls ./outputs
+cat ./outputs/dataset.json
+cat ./outputs/report.md
+```
+
+## Notes
+
+- `harborperf list` does not require Harbor connectivity.
+- `prepare` and `cleanup` only target benchmark-owned resources based on the configured naming prefixes.
+- The legacy `mage` and `scripts/` flow is still present in the repository, but the native Go CLI is the current primary path.
