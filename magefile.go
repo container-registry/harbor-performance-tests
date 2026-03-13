@@ -5,7 +5,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -63,6 +62,17 @@ func mkOutputDir() error {
 	return os.MkdirAll("./outputs", 0755)
 }
 
+// Delete all test projects, repositories, and users
+func Cleanup() error {
+	mg.Deps(EnsureK6)
+
+	env := addHarborEnv(nil)
+
+	args := getK6RunArgs("./scripts/cleanup.js")
+
+	return sh.RunWithV(env, K6Command, args...)
+}
+
 // Generate user data
 func Prepare() error {
 	mg.Deps(EnsureK6, mkOutputDir)
@@ -107,8 +117,19 @@ func Run(test string) error {
 	return nil
 }
 
+// Execute only API tests (excludes push/pull registry tests)
+func API() error {
+	return runTests(func(name string) bool {
+		return !strings.HasPrefix(name, "push-") && !strings.HasPrefix(name, "pull-")
+	})
+}
+
 // Execute all tests
 func All() error {
+	return runTests(nil)
+}
+
+func runTests(filter func(string) bool) error {
 	mg.Deps(EnsureK6, mkOutputDir)
 
 	env := addHarborEnv(nil)
@@ -119,6 +140,10 @@ func All() error {
 	}
 
 	for _, script := range scripts {
+		if filter != nil && !filter(filepath.Base(script)) {
+			continue
+		}
+
 		args := addVusAndIterationsArgs(getK6RunArgs(script))
 
 		if err := sh.RunWithV(env, K6Command, args...); err != nil {
@@ -141,7 +166,7 @@ func List() error {
 	}
 
 	for _, script := range scripts {
-		content, err := ioutil.ReadFile(script)
+		content, err := os.ReadFile(script)
 		if err != nil {
 			return err
 		}
@@ -183,19 +208,14 @@ func installK6() error {
 
 	fmt.Printf("Installing %s\n", K6Command)
 
-	tmp, err := ioutil.TempDir("", "k6")
+	repoPath, err := filepath.Abs("./xk6-harbor")
 	if err != nil {
-		return errors.Wrap(err, "could not create a temp directory to install mage")
-	}
-	defer os.RemoveAll(tmp)
-
-	repoUrl := "https://github.com/goharbor/xk6-harbor.git"
-	err = shx.Command("git", "clone", repoUrl).CollapseArgs().In(tmp).RunE()
-	if err != nil {
-		return errors.Wrapf(err, "could not clone %s", repoUrl)
+		return errors.Wrap(err, "could not resolve path to ./xk6-harbor")
 	}
 
-	repoPath := filepath.Join(tmp, "xk6-harbor")
+	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+		return fmt.Errorf("xk6-harbor not found at %s", repoPath)
+	}
 
 	commit, err := shx.Command("git", "rev-parse", "--short", "HEAD").In(repoPath).OutputE()
 	if err != nil {
